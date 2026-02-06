@@ -1,0 +1,317 @@
+---
+title: "read and mapping quality analysis"
+author: "author"
+date: "31-07-25"
+output: 
+  html_document: 
+    toc: true
+    df_print: kable
+  pdf_document: 
+    toc: true
+---
+
+```{r setup, include=FALSE}
+start_time <- Sys.time()
+knitr::opts_chunk$set(echo = FALSE)
+#installing and loading the libraries needed. code found at https://statsandr.com/blog/an-efficient-way-to-install-and-load-r-packages/
+# Package names
+packages <- c("ggplot2", "ShortRead", "Rsubread", "Biostrings", "GenomicAlignments", "gridExtra")
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+# Package loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+```{r files, include = FALSE, warning=FALSE}
+#Put your working directory file in the file_directory object or directly in the setwd function
+file_directory <- 'C:/Users/nicol/OneDrive/Bureau/master_1/Genomics F402/MapQTest'
+setwd(file_directory)
+
+# load the files table (adapt the path)
+samples <- read.csv('samples.csv', header = TRUE)
+#get the names of the files
+filenames <- as.vector(t((samples[,1:2])))
+#delete the NA in the filenames vector
+filenames <- filenames[!is.na(filenames)]
+#load the urls.csv file if its exist in the actual directory
+if (file.exists('urls.csv')) {
+  urls <- read.csv('urls.csv', header = TRUE)
+  urls$Filename <- filenames
+}
+
+#get the type of the reads and add it to the samples table
+is_paired <- !is.na(samples$Read2) & samples$Read2 != ""
+reads_type <- vapply(is_paired, function(x) {
+  ifelse(x, 'paired_end', 'single_end')}, 
+  character(1))
+samples$Reads_type <- reads_type
+
+if (file.exists('urls.csv')) {
+  urls <- read.csv('urls.csv', header = TRUE)
+  urls$Filename <- filenames
+}
+
+#number of replicates (different of the number of fastq files)
+n_replicate <- nrow(samples)
+#type of the nucleotides for each fastq files
+nt_type <- c()
+for (i in 1:length(samples$Type)) {
+  if (is.na(samples$Read2[i])) {
+    nt_type <- c(nt_type, samples$Type[i])
+  } else {
+    nt_type <- c(nt_type, samples$Type[i], samples$Type[i])
+  }
+}
+
+#download all the files in the data directory
+if (file.exists('urls.csv') == TRUE) {
+  for (i in urls$Urls) {
+    if (file.exists(basename(i)) == FALSE) {
+      download.file(i, basename(i))
+  }
+}}
+```
+
+# FastQ analysis
+
+<p align="center">Table of the basics information and statistics of the FastQ files</p>
+
+```{r FastQ, fig.show='hold', fig.width = 10, fig.height = 4, warning=FALSE}
+#analyse of the fastq file quality
+#initialisation of the fastq table
+row_names <- c('Type', 
+               'Number of reads', 
+               'Mean size of the reads', 
+               'Mean Q-score of the file', 
+               'Q-score first quartile', 
+               'Q-score third quartile')
+
+columnnames <- filenames
+tableau_fastq <- as.data.frame(matrix(data = 'Na',nrow = length(row_names),ncol=length(columnnames)))
+colnames(tableau_fastq) <- columnnames
+rownames(tableau_fastq) <- row_names
+
+#initialisation
+i = 1
+for (file in filenames) {
+  #read the fastq file in memory
+  fq <- readFastq(file)
+  
+  #extract the first sequence
+  seq1 <- sread(fq)[[1]]
+  
+  #number of reads
+  n_reads <- length(fq)
+    
+  #mean size of the reads
+  qt_size <- quantile(width(sread(fq)))[2:4]
+  mean_size <- qt_size[2]
+  
+  #quality of each nt and reads
+  qs_matrix <- as(quality(fq), "matrix")
+  
+  #mean by position
+  base_mn <- c(colMeans2(qs_matrix))
+  
+  #plot the mean Q-score per base in all reads
+  df <- data.frame(position = 1:qt_size[[2]], MeanQscore = colMeans2(qs_matrix))
+  plot <- ggplot(df, aes(x = position, y = MeanQscore)) +
+  geom_line(color = "blue", linewidth = 1) +
+  coord_cartesian(xlim = c(1, qt_size[[2]]), ylim = c(min(df$MeanQscore)-10, max(df$MeanQscore)+10)) + 
+  labs(
+    title = paste('Mean Qscore per base in', file),
+    x = "base position in the read",
+    y = "Mean Q-score"
+  ) + theme(legend.position = c(0.40, 0.20),legend.background = element_blank(), legend.box.background =   element_rect(color = "black", fill = NA),axis.line = element_line(linewidth = 0.7, colour = "black",     linetype=1), 
+        plot.title = element_text(hjust = 0.5)) + scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0))
+
+  #mean quality of the file and the first and third quantile
+  mn_qs <- mean(colMeans2(qs_matrix[]))
+  q1 <- quantile(qs_matrix, 0.25)
+  q2 <- mean(qs_matrix)
+  q3 <- quantile(qs_matrix, 0.75)
+  
+  #minimal qscore for 0.95 proba of 0 error
+  minimal_pb <- 1 - exp(log(0.95)/qt_size[[2]])
+  minimal_qs <- -10*log10(minimal_pb)
+  plot <- plot + geom_hline(aes(yintercept = minimal_qs, color = "Probability to have 0 error in a read"), linetype = 2) +
+  scale_color_manual(name = "legend", values = c("Probability to have 0 error in a read" = "red"))
+  
+  #distribution of the mean quality of the reads
+  qs_values <- as(encoding(quality(fq)), 'vector')
+  reads_mean <- c(rowMeans2(qs_matrix))
+  
+  hist_df <- data.frame(MeanQ = reads_mean)
+  histo <- ggplot(hist_df, aes(x = MeanQ)) +
+  geom_histogram(breaks = qs_values, fill = "gray", color = "black") +
+  scale_x_continuous(
+    name = "Q-score",
+    breaks = seq(min(qs_values), max(qs_values), by = 20),
+    limits = range(qs_values),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name = "number of reads",
+    expand = c(0, 0)
+  ) +
+  ggtitle(paste("Distribution of Read Quality \n in", file)) +
+  theme(
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+  grid.arrange(plot, histo, ncol=2)
+  
+  #add the basic information on the table
+  infos <- c(nt_type[i], n_reads, mean_size, round(mn_qs, 2), q1, q3)
+  tableau_fastq[,i] <- infos
+  i = i + 1
+  }
+tableau_fastq
+```
+
+Q-score = -10log(P) ; where P is the probability to have an error in a base.\
+A Q-score below 20 means that the accuracy of a given base is below 99%
+
+```{r ref_genome, include=FALSE}
+genome_id <- basename(list.files(pattern = "\\.(fa|fasta)(\\.gz)?$")) #pattern found with chatgpt to find the file whether its extension is fa, fasta or zip.
+genome_seq <- readDNAStringSet(genome_id)
+
+#number of chromosomes
+chromosomes <- c(unique(gsub( '_.*', '', names(genome_seq))))
+chromosomes <- chromosomes[grep(pattern = "Un|un", chromosomes, invert = TRUE)]
+n_chromosomes <- length(chromosomes)
+
+# build the index
+buildindex(basename = gsub('\\.(fa|fasta)(\\.gz)?$', '_index',genome_id), reference = genome_id)
+```
+
+```{r mapping, include=FALSE}
+mapply(FUN = function(file1, file2, nt_type, r_type, id) {
+  if (r_type == 'single_end') {
+    align(index = gsub('\\.(fa|fasta)(\\.gz)?$', '_index',genome_id), 
+          readfile1 = file1, 
+          type = ifelse(nt_type == 'rna', 'rna', 'dna'), 
+          output_file = paste(id, "_mapped.bam", sep=""), 
+          nthreads = 10)
+  } else {
+    align(index = gsub('\\.(fa|fasta)(\\.gz)?$', '_index',genome_id), 
+          readfile1 = file1, 
+          readfile2 = file2,
+          type = ifelse(nt_type == 'rna', 'rna', 'dna'), 
+          output_file = paste(id, "_mapped.bam", sep=""), 
+          nthreads = 10)
+  }
+}, samples$Read1, samples$Read2,samples$Type, samples$Reads_type,samples$Id)
+```
+
+# Mapping and coverage statistics
+
+<p align="center">Table of the mapping and coverage statistics of the mapped files</p>
+
+```{r mapping statistics, fig.show='hold', fig.width = 10, fig.height = 4, warning=FALSE, message = FALSE}
+bamId <- paste(samples$Id, "_mapped.bam", sep="")
+
+#initialisation of the mapping statistics table
+row_names <- c('Number of lectures mapped', 
+               'Proportion of mapped lectures', 
+               'Mean MapQ score of the file', 
+               'Mean coverage of the genome', 
+               paste("Mean coverage of the chromosome", chromosomes))
+
+columnnames <- bamId
+tableau_mapping <- as.data.frame(matrix(data = 'Na',nrow = length(row_names),ncol=length(columnnames)))
+colnames(tableau_mapping) <- columnnames
+rownames(tableau_mapping) <- row_names
+
+#initialisation
+i = 1
+for (mapped_file in bamId) {
+  # sort and index the bam file
+  sortBam(mapped_file, sub(pattern = '.bam', "_sorted",mapped_file))
+  mapped_file_sorted <- paste0(sub(pattern = '.bam', "_sorted",mapped_file), ".bam")
+  indexBam(mapped_file_sorted)
+  
+  bam_all <- scanBam(mapped_file_sorted)[[1]]
+  bam_mapped <- readGAlignments(mapped_file_sorted)
+  
+  #number of lectures mapped
+  n_reads <- as.integer(length(bam_all$seq))
+  #proportion of mapped lectures
+  mapped_reads <- length(bam_mapped)
+  #proportion of mapped lectures
+  mapped_proportion <- round(x = ((mapped_reads / n_reads) * 100), digits = 3)
+  #mean MapQ score of the file
+  mn_mapq <- round(x = (mean(bam_all$mapq, na.rm = TRUE)), digits = 3)
+  
+  #distribution of the mapq score in the bam file
+  hist_df <- data.frame(MapQ = bam_all$mapq)
+  histo <- ggplot(hist_df) + aes(x = MapQ) + 
+  geom_histogram(aes(y = after_stat(count / sum(count))), fill = "gray", color = "black") + 
+  scale_x_continuous(expand = c(0, 0)) + 
+  scale_y_continuous(name = "frequency of the MapQ scores", expand = c(0, 0)) + 
+  ggtitle(paste('Distribution of the MapQ scores \n in', mapped_file)) + 
+  theme(panel.background = element_blank(),panel.grid = element_blank(),axis.line = element_line(color = "black"),plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  #coverage statistics
+  gcov <- coverage(bam_mapped)
+  gcov_vector <- as(gcov, 'vector')
+  #coverage mean by chromosome
+  chr_cov <- sapply(X = chromosomes, FUN = function(chr) {
+    mean(gcov_vector[[chr]])
+  } )
+  #coverage mean of the genome
+  #length of the genome
+  chr_lengths <- sum(sapply(chromosomes, function(chr) length(gcov[[chr]])))         #coverage of the genome
+  cov_sum <- sum(sapply(chromosomes, function(chr) {sum(gcov[[chr]])})) 
+  mn_cov_genome <- cov_sum/chr_lengths
+  #distribution of the local coverage (1000bp by window)
+  compute_cov <- function(w, wsize) {
+    w <- as.numeric(w)
+    bins <- ceiling((1:length(w)) / wsize)
+    return(as.vector(rowsum(w, bins)))
+  } #source Practical 04
+  cov_1kb_all <- lapply(chromosomes, function(chr) {
+    w <- as(gcov[[chr]], "vector")
+    compute_cov(w, 1000)
+  })
+  names(cov_1kb_all) <- chromosomes
+  # join all the chromosomes
+  cov_1kb_genome <- unlist(cov_1kb_all)
+  #plot of the coverage across the genome
+  df <- data.frame(position = 1:length(cov_1kb_genome), Coverage = as.numeric(cov_1kb_genome))
+  plot <- ggplot(df) + 
+  aes(x = position, y = Coverage) + 
+  geom_line() + 
+  scale_x_continuous(name = "Read coverage per 1000bp windows",expand = c(0, 0)) + 
+  scale_y_continuous(name = "Position in the genome \n based on 1000bp windows",expand = c(0, 0)) +
+  ggtitle(paste("Coverage across the genome in 1000bp windows \n for", mapped_file)) + 
+  theme(panel.background = element_blank(), 
+        panel.grid = element_blank(), 
+        axis.line = element_line(color = "black"), 
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  grid.arrange(histo, plot, ncol = 2)
+  #add the basic information on the table
+  infos <- c(as.integer(n_reads), format(mapped_proportion, scientific = FALSE), mn_mapq, round(x = mn_cov_genome, digits = 3), round(x = chr_cov, digits =3))
+  tableau_mapping[,i] <- infos
+  i = i + 1
+}
+tableau_mapping
+```
+
+# Running time of the analysis 
+
+```{r time}
+end_time = Sys.time()
+run_time = round(end_time - start_time, 2)
+run_time
+```
+
+
+
+
